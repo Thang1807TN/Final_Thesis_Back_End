@@ -70,3 +70,9 @@ uploads/
 
 .DS_Store
 Thumbs.db
+bin/
+obj/
+.vs/
+*.user
+*.suo
+appsettings.Development.json
