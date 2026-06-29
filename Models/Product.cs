@@ -24,7 +24,11 @@ namespace SecondHandMarketplaceAPI.Models
         public string Location { get; set; } = string.Empty;
 
         public ProductCondition Condition { get; set; }
+
         public bool IsAvailable { get; set; } = true;
+
+        public bool IsDeleted { get; set; } = false;
+
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
         public int CategoryId { get; set; }

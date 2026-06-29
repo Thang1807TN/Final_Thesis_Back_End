@@ -93,7 +93,7 @@ namespace SecondHandMarketplaceAPI.Controllers
                 return NotFound(new { message = "Product not found or access denied." });
             }
 
-            return Ok(new { message = "Product deleted successfully." });
+            return Ok(new { message = "Product listing deleted successfully. Transactions and payments are kept." });
         }
     }
 }

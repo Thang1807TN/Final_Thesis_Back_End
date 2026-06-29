@@ -12,7 +12,7 @@ namespace SecondHandMarketplaceAPI.Models
         public decimal Amount { get; set; }
         public PaymentMethod PaymentMethod { get; set; }
         public PaymentStatus PaymentStatus { get; set; } = PaymentStatus.Pending;
-
+        public string? AppliedCouponCode { get; set; }
         public string? ExternalTransactionCode { get; set; }
         public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
         public DateTime? PaidAt { get; set; }

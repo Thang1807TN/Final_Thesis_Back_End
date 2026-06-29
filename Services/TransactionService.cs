@@ -88,19 +88,13 @@ namespace SecondHandMarketplaceAPI.Services
                 return null;
             }
 
-            var buyer = await _context.Users.FirstOrDefaultAsync(u => u.Id == buyerId);
-            if (buyer == null)
-            {
-                return null;
-            }
-
             var transaction = new Transaction
             {
                 ProductId = product.Id,
                 BuyerId = buyerId,
                 SellerId = product.SellerId,
                 TotalAmount = product.Price,
-                Status = TransactionStatus.Pending.ToString(),
+                Status = "Pending",
                 CreatedAt = DateTime.UtcNow
             };
 
@@ -110,25 +104,20 @@ namespace SecondHandMarketplaceAPI.Services
             await _orderTimelineService.AddAsync(
                 transaction.Id,
                 "Transaction created",
-                $"A transaction was created for product \"{product.Title}\"."
+                $"Transaction created for \"{product.Title}\"."
             );
 
-            var created = await _context.Transactions
-                .Include(t => t.Product)
-                .Include(t => t.Buyer)
-                .Include(t => t.Seller)
-                .Include(t => t.Payment)
-                .FirstAsync(t => t.Id == transaction.Id);
-
-            return MapToResponseDto(created);
+            return MapToResponseDto(transaction);
         }
 
-        public async Task<TransactionResponseDto?> UpdateStatusAsync(int id, string userId, UpdateTransactionStatusDto dto, bool isAdmin)
+        public async Task<TransactionResponseDto?> UpdateStatusAsync(
+            int id,
+            string userId,
+            UpdateTransactionStatusDto dto,
+            bool isAdmin)
         {
             var transaction = await _context.Transactions
                 .Include(t => t.Product)
-                .Include(t => t.Buyer)
-                .Include(t => t.Seller)
                 .Include(t => t.Payment)
                 .FirstOrDefaultAsync(t => t.Id == id);
 
@@ -138,35 +127,91 @@ namespace SecondHandMarketplaceAPI.Services
             }
 
             var isOwner = transaction.BuyerId == userId || transaction.SellerId == userId;
+
             if (!isAdmin && !isOwner)
             {
                 return null;
             }
 
-            transaction.Status = dto.Status.ToString();
-
-            if (dto.Status == TransactionStatus.Completed && transaction.Product != null)
+            switch (dto.Status)
             {
-                transaction.Product.IsAvailable = false;
+                case TransactionStatus.Pending:
+                    transaction.Status = "Pending";
+
+                    if (transaction.Payment != null)
+                    {
+                        transaction.Payment.PaymentStatus = PaymentStatus.Pending;
+                        transaction.Payment.PaidAt = null;
+                    }
+
+                    if (transaction.Product != null)
+                    {
+                        transaction.Product.IsAvailable = true;
+                    }
+                    break;
+
+                case TransactionStatus.Paid:
+                    transaction.Status = "Paid";
+
+                    if (transaction.Payment != null)
+                    {
+                        transaction.Payment.PaymentStatus = PaymentStatus.Paid;
+                        transaction.Payment.PaidAt = DateTime.UtcNow;
+                    }
+
+                    if (transaction.Product != null)
+                    {
+                        transaction.Product.IsAvailable = false;
+                    }
+                    break;
+
+                case TransactionStatus.Completed:
+                    if (!string.Equals(transaction.Status, "Paid", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return null;
+                    }
+
+                    transaction.Status = "Completed";
+                    break;
+
+                case TransactionStatus.Cancelled:
+                    transaction.Status = "Cancelled";
+
+                    if (transaction.Payment != null)
+                    {
+                        transaction.Payment.PaymentStatus = PaymentStatus.Failed;
+                        transaction.Payment.PaidAt = null;
+                    }
+
+                    if (transaction.Product != null)
+                    {
+                        transaction.Product.IsAvailable = true;
+                    }
+                    break;
+
+                default:
+                    transaction.Status = dto.Status.ToString();
+                    break;
             }
 
             await _context.SaveChangesAsync();
 
             await _orderTimelineService.AddAsync(
                 transaction.Id,
-                "Transaction status updated",
-                $"Transaction status changed to {transaction.Status}."
+                "Transaction updated",
+                $"Status changed to {transaction.Status}"
             );
 
             return MapToResponseDto(transaction);
         }
 
-        public async Task<TransactionResponseDto?> MarkCompletedAsync(int id, string userId, bool isAdmin = false)
+        public async Task<TransactionResponseDto?> MarkCompletedAsync(
+            int id,
+            string userId,
+            bool isAdmin = false)
         {
             var transaction = await _context.Transactions
                 .Include(t => t.Product)
-                .Include(t => t.Buyer)
-                .Include(t => t.Seller)
                 .Include(t => t.Payment)
                 .FirstOrDefaultAsync(t => t.Id == id);
 
@@ -186,12 +231,13 @@ namespace SecondHandMarketplaceAPI.Services
             }
 
             transaction.Status = "Completed";
+
             await _context.SaveChangesAsync();
 
             await _orderTimelineService.AddAsync(
                 transaction.Id,
                 "Order completed",
-                "The transaction has been marked as completed."
+                "Transaction marked as completed"
             );
 
             return MapToResponseDto(transaction);
@@ -199,16 +245,32 @@ namespace SecondHandMarketplaceAPI.Services
 
         private static TransactionResponseDto MapToResponseDto(Transaction transaction)
         {
+            var originalAmount = transaction.TotalAmount;
+            var paidAmount = transaction.Payment?.Amount;
+
+            var discountAmount = paidAmount.HasValue
+                ? Math.Max(0, originalAmount - paidAmount.Value)
+                : 0;
+
+            var discountPercent =
+                originalAmount > 0 && discountAmount > 0
+                    ? (int)Math.Round((discountAmount / originalAmount) * 100)
+                    : 0;
+
             return new TransactionResponseDto
             {
                 Id = transaction.Id,
                 ProductId = transaction.ProductId,
-                ProductTitle = transaction.Product?.Title ?? string.Empty,
+                ProductTitle = transaction.Product?.Title ?? "",
                 BuyerId = transaction.BuyerId,
-                BuyerName = transaction.Buyer?.FullName ?? string.Empty,
+                BuyerName = transaction.Buyer?.FullName ?? "",
                 SellerId = transaction.SellerId,
-                SellerName = transaction.Seller?.FullName ?? string.Empty,
-                TotalAmount = transaction.TotalAmount,
+                SellerName = transaction.Seller?.FullName ?? "",
+                TotalAmount = originalAmount,
+                PaidAmount = paidAmount,
+                DiscountAmount = discountAmount,
+                DiscountPercent = discountPercent,
+                AppliedCouponCode = transaction.Payment?.AppliedCouponCode,
                 Status = transaction.Status,
                 CreatedAt = transaction.CreatedAt,
                 PaymentId = transaction.Payment?.Id,

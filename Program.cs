@@ -96,6 +96,7 @@ builder.Services.AddScoped<IProductService, ProductService>();
 builder.Services.AddScoped<ITransactionService, TransactionService>();
 builder.Services.AddScoped<IBlobService, BlobService>();
 builder.Services.AddScoped<IPaymentService, PaymentService>();
+builder.Services.AddScoped<IPaymentInvoiceService, PaymentInvoiceService>();
 builder.Services.AddScoped<IChatService, ChatService>();
 builder.Services.AddScoped<IReviewService, ReviewService>();
 builder.Services.AddScoped<IFavoriteService, FavoriteService>();

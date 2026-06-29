@@ -37,11 +37,6 @@ namespace SecondHandMarketplaceAPI.Services
                 return null;
             }
 
-            if (transaction.Payment != null)
-            {
-                return MapToResponseDto(transaction.Payment, transaction.TotalAmount, 0, null);
-            }
-
             decimal originalTotal = transaction.TotalAmount;
             decimal discountAmount = 0;
             string? appliedCouponCode = null;
@@ -49,18 +44,72 @@ namespace SecondHandMarketplaceAPI.Services
             if (!string.IsNullOrWhiteSpace(dto.CouponCode))
             {
                 var validation = await ValidateCouponInternalAsync(transaction, dto.CouponCode);
+
                 if (validation.IsValid)
                 {
                     discountAmount = validation.DiscountAmount;
                     appliedCouponCode = validation.CouponCode;
 
-                    var coupon = await _context.Coupons.FirstAsync(c => c.Code == validation.CouponCode);
-                    coupon.UsedCount += 1;
+                    var coupon = await _context.Coupons.FirstOrDefaultAsync(c => c.Code == validation.CouponCode);
+                    if (coupon != null)
+                    {
+                        coupon.UsedCount += 1;
+                    }
                 }
             }
 
-            var finalAmount = originalTotal - discountAmount;
-            if (finalAmount < 0) finalAmount = 0;
+            var finalAmount = Math.Max(0, originalTotal - discountAmount);
+
+            if (transaction.Payment != null)
+            {
+                var existingPayment = await _context.Payments
+                    .Include(p => p.Transaction)
+                        .ThenInclude(t => t.Product)
+                    .Include(p => p.Transaction)
+                        .ThenInclude(t => t.Buyer)
+                    .Include(p => p.Transaction)
+                        .ThenInclude(t => t.Seller)
+                    .FirstOrDefaultAsync(p => p.Id == transaction.Payment.Id);
+
+                if (existingPayment == null)
+                {
+                    return null;
+                }
+
+                existingPayment.PaymentMethod = dto.PaymentMethod;
+                existingPayment.Amount = finalAmount;
+
+                ApplyPaymentStatusToTransaction(
+                    existingPayment,
+                    dto.PaymentMethod == PaymentMethod.CashOnDelivery
+                        ? PaymentStatus.Pending
+                        : PaymentStatus.Paid
+                );
+
+                if (existingPayment.PaymentStatus == PaymentStatus.Paid)
+                {
+                    existingPayment.ExternalTransactionCode = dto.PaymentMethod == PaymentMethod.OnlineDemo
+                        ? $"DEMO-{Guid.NewGuid().ToString("N")[..10].ToUpper()}"
+                        : dto.PaymentMethod == PaymentMethod.BankTransfer
+                            ? $"BANK-{Guid.NewGuid().ToString("N")[..10].ToUpper()}"
+                            : existingPayment.ExternalTransactionCode;
+                }
+
+                await _context.SaveChangesAsync();
+
+                await _orderTimelineService.AddAsync(
+                    existingPayment.TransactionId,
+                    "Payment confirmed",
+                    $"Payment method: {existingPayment.PaymentMethod}. Status: {existingPayment.PaymentStatus}."
+                );
+
+                return MapToResponseDto(
+                    existingPayment,
+                    existingPayment.Transaction?.TotalAmount ?? existingPayment.Amount,
+                    discountAmount,
+                    appliedCouponCode
+                );
+            }
 
             var payment = new Payment
             {
@@ -84,10 +133,15 @@ namespace SecondHandMarketplaceAPI.Services
             if (payment.PaymentStatus == PaymentStatus.Paid)
             {
                 transaction.Status = "Paid";
+
                 if (transaction.Product != null)
                 {
                     transaction.Product.IsAvailable = false;
                 }
+            }
+            else
+            {
+                transaction.Status = "Pending";
             }
 
             await _context.SaveChangesAsync();
@@ -95,29 +149,10 @@ namespace SecondHandMarketplaceAPI.Services
             await _orderTimelineService.AddAsync(
                 transaction.Id,
                 "Payment created",
-                $"Payment method: {payment.PaymentMethod}. Status: {payment.PaymentStatus}."
+                $"Method: {payment.PaymentMethod}, Status: {payment.PaymentStatus}"
             );
 
-            if (!string.IsNullOrWhiteSpace(appliedCouponCode))
-            {
-                await _orderTimelineService.AddAsync(
-                    transaction.Id,
-                    "Coupon applied",
-                    $"Coupon {appliedCouponCode} applied. Discount amount: {discountAmount}."
-                );
-            }
-
-            await _emailMockService.SendAsync(
-                transaction.Buyer?.Email ?? string.Empty,
-                $"Payment created for transaction #{transaction.Id}",
-                $"Hello {transaction.Buyer?.FullName},\n\nYour payment for product \"{transaction.Product?.Title}\" has been created.\nMethod: {payment.PaymentMethod}\nStatus: {payment.PaymentStatus}\nAmount: {payment.Amount}\n\nThis is a mock email from GreenMarket."
-            );
-
-            await _emailMockService.SendAsync(
-                transaction.Seller?.Email ?? string.Empty,
-                "A payment has been recorded for your listing",
-                $"Hello {transaction.Seller?.FullName},\n\nA payment related to your product \"{transaction.Product?.Title}\" has been recorded.\nBuyer: {transaction.Buyer?.FullName}\nStatus: {payment.PaymentStatus}\nAmount: {payment.Amount}\n\nThis is a mock email from GreenMarket."
-            );
+            await SendPaymentCreatedEmailsAsync(transaction, payment);
 
             var created = await _context.Payments
                 .Include(p => p.Transaction)
@@ -171,15 +206,23 @@ namespace SecondHandMarketplaceAPI.Services
             if (!isAdmin)
             {
                 query = query.Where(p =>
-                    p.Transaction!.BuyerId == userId ||
-                    p.Transaction!.SellerId == userId);
+                    p.Transaction != null &&
+                    (p.Transaction.BuyerId == userId || p.Transaction.SellerId == userId));
             }
 
-            var payments = await query.OrderByDescending(p => p.CreatedAt).ToListAsync();
-            return payments.Select(p => MapToResponseDto(p, p.Transaction?.TotalAmount ?? p.Amount, 0, null));
+            var payments = await query
+                .OrderByDescending(p => p.CreatedAt)
+                .ToListAsync();
+
+            return payments.Select(p =>
+                MapToResponseDto(p, p.Transaction?.TotalAmount ?? p.Amount, 0, null));
         }
 
-        public async Task<PaymentResponseDto?> UpdateStatusAsync(int id, UpdatePaymentStatusDto dto, string userId, bool isAdmin = false)
+        public async Task<PaymentResponseDto?> UpdateStatusAsync(
+            int id,
+            UpdatePaymentStatusDto dto,
+            string userId,
+            bool isAdmin = false)
         {
             var payment = await _context.Payments
                 .Include(p => p.Transaction)
@@ -195,47 +238,27 @@ namespace SecondHandMarketplaceAPI.Services
                 return null;
             }
 
-            var isOwner = payment.Transaction?.BuyerId == userId || payment.Transaction?.SellerId == userId;
+            var isOwner = payment.Transaction?.BuyerId == userId ||
+                          payment.Transaction?.SellerId == userId;
+
             if (!isAdmin && !isOwner)
             {
                 return null;
             }
 
-            payment.PaymentStatus = dto.PaymentStatus;
-
-            if (dto.PaymentStatus == PaymentStatus.Paid)
+            if (!isAdmin && dto.PaymentStatus == PaymentStatus.Refunded)
             {
-                payment.PaidAt = DateTime.UtcNow;
-
-                if (payment.Transaction != null)
-                {
-                    payment.Transaction.Status = "Paid";
-
-                    if (payment.Transaction.Product != null)
-                    {
-                        payment.Transaction.Product.IsAvailable = false;
-                    }
-                }
-
-                await _emailMockService.SendAsync(
-                    payment.Transaction?.Buyer?.Email ?? string.Empty,
-                    $"Payment completed for transaction #{payment.TransactionId}",
-                    $"Hello {payment.Transaction?.Buyer?.FullName},\n\nYour payment for \"{payment.Transaction?.Product?.Title}\" is now marked as Paid.\n\nThis is a mock email from GreenMarket."
-                );
-
-                await _emailMockService.SendAsync(
-                    payment.Transaction?.Seller?.Email ?? string.Empty,
-                    "Payment received for your product",
-                    $"Hello {payment.Transaction?.Seller?.FullName},\n\nThe payment for your product \"{payment.Transaction?.Product?.Title}\" has been completed.\n\nThis is a mock email from GreenMarket."
-                );
+                return null;
             }
+
+            ApplyPaymentStatusToTransaction(payment, dto.PaymentStatus);
 
             await _context.SaveChangesAsync();
 
             await _orderTimelineService.AddAsync(
                 payment.TransactionId,
-                "Payment status updated",
-                $"Payment status changed to {dto.PaymentStatus}."
+                "Payment updated",
+                $"Status: {payment.PaymentStatus}. Transaction status: {payment.Transaction?.Status ?? "N/A"}."
             );
 
             return MapToResponseDto(payment, payment.Transaction?.TotalAmount ?? payment.Amount, 0, null);
@@ -258,6 +281,63 @@ namespace SecondHandMarketplaceAPI.Services
             return await ValidateCouponInternalAsync(transaction, dto.CouponCode);
         }
 
+        private static void ApplyPaymentStatusToTransaction(Payment payment, PaymentStatus status)
+        {
+            payment.PaymentStatus = status;
+
+            if (payment.Transaction == null)
+            {
+                return;
+            }
+
+            switch (status)
+            {
+                case PaymentStatus.Paid:
+                    payment.PaidAt = DateTime.UtcNow;
+                    payment.Transaction.Status = "Paid";
+
+                    if (payment.Transaction.Product != null)
+                    {
+                        payment.Transaction.Product.IsAvailable = false;
+                    }
+
+                    break;
+
+                case PaymentStatus.Pending:
+                    payment.PaidAt = null;
+                    payment.Transaction.Status = "Pending";
+
+                    if (payment.Transaction.Product != null)
+                    {
+                        payment.Transaction.Product.IsAvailable = true;
+                    }
+
+                    break;
+
+                case PaymentStatus.Failed:
+                    payment.PaidAt = null;
+                    payment.Transaction.Status = "Pending";
+
+                    if (payment.Transaction.Product != null)
+                    {
+                        payment.Transaction.Product.IsAvailable = true;
+                    }
+
+                    break;
+
+                case PaymentStatus.Refunded:
+                    payment.PaidAt = null;
+                    payment.Transaction.Status = "Cancelled";
+
+                    if (payment.Transaction.Product != null)
+                    {
+                        payment.Transaction.Product.IsAvailable = true;
+                    }
+
+                    break;
+            }
+        }
+
         private async Task<CouponValidationResponseDto> ValidateCouponInternalAsync(Transaction transaction, string couponCode)
         {
             var result = new CouponValidationResponseDto
@@ -269,7 +349,7 @@ namespace SecondHandMarketplaceAPI.Services
 
             if (string.IsNullOrWhiteSpace(result.CouponCode))
             {
-                result.Message = "Please enter a coupon code.";
+                result.Message = "Enter coupon code.";
                 return result;
             }
 
@@ -281,21 +361,45 @@ namespace SecondHandMarketplaceAPI.Services
 
             if (coupon == null)
             {
-                result.Message = "Coupon is invalid or expired.";
+                result.Message = "Invalid or expired coupon.";
                 return result;
             }
 
             result.IsValid = true;
             result.DiscountPercent = coupon.DiscountPercent;
             result.DiscountAmount = Math.Round(transaction.TotalAmount * coupon.DiscountPercent / 100m, 2);
-            result.FinalTotal = transaction.TotalAmount - result.DiscountAmount;
-            if (result.FinalTotal < 0) result.FinalTotal = 0;
+            result.FinalTotal = Math.Max(0, transaction.TotalAmount - result.DiscountAmount);
             result.Message = $"Coupon applied successfully. Discount: {coupon.DiscountPercent}%";
 
             return result;
         }
 
-        private static PaymentResponseDto MapToResponseDto(Payment payment, decimal originalTotal, decimal discountAmount, string? couponCode)
+        private async Task SendPaymentCreatedEmailsAsync(Transaction transaction, Payment payment)
+        {
+            if (!string.IsNullOrWhiteSpace(transaction.Buyer?.Email))
+            {
+                await _emailMockService.SendAsync(
+                    transaction.Buyer.Email,
+                    "Payment created",
+                    "Payment has been created."
+                );
+            }
+
+            if (!string.IsNullOrWhiteSpace(transaction.Seller?.Email))
+            {
+                await _emailMockService.SendAsync(
+                    transaction.Seller.Email,
+                    "Payment recorded",
+                    "Payment has been recorded."
+                );
+            }
+        }
+
+        private static PaymentResponseDto MapToResponseDto(
+            Payment payment,
+            decimal originalTotal,
+            decimal discountAmount,
+            string? couponCode)
         {
             return new PaymentResponseDto
             {

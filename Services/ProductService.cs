@@ -23,6 +23,7 @@ namespace SecondHandMarketplaceAPI.Services
                 .Include(p => p.Category)
                 .Include(p => p.Seller)
                 .Include(p => p.Images)
+                .Where(p => !p.IsDeleted && p.IsAvailable)
                 .AsQueryable();
 
             if (!string.IsNullOrWhiteSpace(filter.Keyword))
@@ -59,8 +60,6 @@ namespace SecondHandMarketplaceAPI.Services
             {
                 "priceasc" or "price-low-high" => query.OrderBy(p => p.Price),
                 "pricedesc" or "price-high-low" => query.OrderByDescending(p => p.Price),
-                "available" or "availablefirst" => query.OrderByDescending(p => p.IsAvailable).ThenByDescending(p => p.CreatedAt),
-                "sold" or "soldfirst" => query.OrderBy(p => p.IsAvailable).ThenByDescending(p => p.CreatedAt),
                 _ => query.OrderByDescending(p => p.CreatedAt)
             };
 
@@ -75,6 +74,7 @@ namespace SecondHandMarketplaceAPI.Services
                 .ToListAsync();
 
             var items = new List<ProductResponseDto>();
+
             foreach (var product in products)
             {
                 items.Add(await MapToResponseDtoAsync(product));
@@ -96,7 +96,7 @@ namespace SecondHandMarketplaceAPI.Services
                 .Include(p => p.Category)
                 .Include(p => p.Seller)
                 .Include(p => p.Images)
-                .FirstOrDefaultAsync(p => p.Id == id);
+                .FirstOrDefaultAsync(p => p.Id == id && !p.IsDeleted);
 
             return product == null ? null : await MapToResponseDtoAsync(product);
         }
@@ -107,11 +107,12 @@ namespace SecondHandMarketplaceAPI.Services
                 .Include(p => p.Category)
                 .Include(p => p.Seller)
                 .Include(p => p.Images)
-                .Where(p => p.SellerId == sellerId)
+                .Where(p => p.SellerId == sellerId && !p.IsDeleted)
                 .OrderByDescending(p => p.CreatedAt)
                 .ToListAsync();
 
             var result = new List<ProductResponseDto>();
+
             foreach (var product in products)
             {
                 result.Add(await MapToResponseDtoAsync(product));
@@ -126,11 +127,12 @@ namespace SecondHandMarketplaceAPI.Services
                 .Include(p => p.Category)
                 .Include(p => p.Seller)
                 .Include(p => p.Images)
-                .Where(p => p.SellerId == sellerId)
+                .Where(p => p.SellerId == sellerId && !p.IsDeleted && p.IsAvailable)
                 .OrderByDescending(p => p.CreatedAt)
                 .ToListAsync();
 
             var result = new List<ProductResponseDto>();
+
             foreach (var product in products)
             {
                 result.Add(await MapToResponseDtoAsync(product));
@@ -151,6 +153,7 @@ namespace SecondHandMarketplaceAPI.Services
                 CategoryId = dto.CategoryId,
                 SellerId = sellerId,
                 IsAvailable = true,
+                IsDeleted = false,
                 CreatedAt = DateTime.UtcNow
             };
 
@@ -181,7 +184,7 @@ namespace SecondHandMarketplaceAPI.Services
                 .Include(p => p.Images)
                 .Include(p => p.Category)
                 .Include(p => p.Seller)
-                .FirstOrDefaultAsync(p => p.Id == id);
+                .FirstOrDefaultAsync(p => p.Id == id && !p.IsDeleted);
 
             if (product == null)
             {
@@ -228,8 +231,7 @@ namespace SecondHandMarketplaceAPI.Services
         public async Task<bool> DeleteAsync(int id, string userId, bool isAdmin = false)
         {
             var product = await _context.Products
-                .Include(p => p.Images)
-                .FirstOrDefaultAsync(p => p.Id == id);
+                .FirstOrDefaultAsync(p => p.Id == id && !p.IsDeleted);
 
             if (product == null)
             {
@@ -241,8 +243,11 @@ namespace SecondHandMarketplaceAPI.Services
                 return false;
             }
 
-            _context.Products.Remove(product);
+            product.IsDeleted = true;
+            product.IsAvailable = false;
+
             await _context.SaveChangesAsync();
+
             return true;
         }
 
@@ -253,7 +258,9 @@ namespace SecondHandMarketplaceAPI.Services
                 .ToListAsync();
 
             var totalReviews = reviews.Count;
-            var averageRating = totalReviews == 0 ? 0 : Math.Round(reviews.Average(r => r.Rating), 1);
+            var averageRating = totalReviews == 0
+                ? 0
+                : Math.Round(reviews.Average(r => r.Rating), 1);
 
             var completedCount = await _context.Transactions.CountAsync(t =>
                 t.SellerId == product.SellerId &&

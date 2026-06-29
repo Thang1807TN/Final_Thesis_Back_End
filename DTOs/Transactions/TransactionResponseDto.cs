@@ -13,7 +13,21 @@
         public string SellerId { get; set; } = string.Empty;
         public string SellerName { get; set; } = string.Empty;
 
+        // 👉 Giá gốc
         public decimal TotalAmount { get; set; }
+
+        // 👉 Giá sau giảm
+        public decimal? PaidAmount { get; set; }
+
+        // 👉 Số tiền giảm
+        public decimal DiscountAmount { get; set; }
+
+        // 👉 % giảm
+        public int DiscountPercent { get; set; }
+
+        // 👉 Coupon đã dùng
+        public string? AppliedCouponCode { get; set; }
+
         public string Status { get; set; } = string.Empty;
         public DateTime CreatedAt { get; set; }
 
